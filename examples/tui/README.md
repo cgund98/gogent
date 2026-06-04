@@ -12,5 +12,11 @@ A minimal terminal chat Text UI (Claude/Codex-style)
 ## Run
 
 ```bash
-go run ./examples/tui
+
+cd examples/tui
+
+# Provide API Key. Can also set this in an `.env` file in `examples/tui/`.
+export OPENAI_API_KEY=my-api-key
+
+go run .
 ```

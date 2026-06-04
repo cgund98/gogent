@@ -3,7 +3,7 @@ module github.com/cgund98/gogent/examples/tui
 go 1.25.0
 
 require (
-	github.com/cgund98/gogent v0.0.0
+	github.com/cgund98/gogent v0.1.0
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/glamour v1.0.0
