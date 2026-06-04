@@ -7,7 +7,10 @@ Demonstrates the gogent agent with OpenAI tool calling, auto-executed tools, and
 From the repository root:
 
 ```bash
-# .env with OPENAI_API_KEY
+
+# Provide API Key. Can also set this in an `.env` file in repository root.
+export OPENAI_API_KEY=my-api-key
+
 make example-simple
 ```
 
