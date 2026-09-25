@@ -10,7 +10,14 @@ Gogent targets applications where a user converses with an agent in a chat inter
 - **Core agent loop** — orchestrates history, model turns, tool execution, and transcript updates until the model finishes or a guardrail stops the run.
 - **Human-in-the-loop** — require explicit approval before sensitive tools run; workflow state stays separate from what the model sees on the next turn.
 
-Provider-specific wiring lives in separate packages (for example `openai`). See [ARCHITECTURE.md](ARCHITECTURE.md) for message types, lifecycle, and approval flow.
+Provider-specific wiring lives in separate packages. See [ARCHITECTURE.md](ARCHITECTURE.md) for message types, lifecycle, and approval flow.
+
+## Providers
+
+| Package | API |
+|---------|-----|
+| [`openai`](openai) | OpenAI Chat Completions (`https://api.openai.com/v1`). Pass your own client to `openai.NewChat`. The default model is `gpt-4o-mini`. |
+| [`kimi`](kimi) | Moonshot Kimi Chat Completions (`https://api.moonshot.ai/v1`). `kimi.NewChat` builds a client for that API and returns the same chat builder. |
 
 ## Examples
 
