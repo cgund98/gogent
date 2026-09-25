@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,8 @@ func (s *memoryStore) DeleteAllMessages(_ context.Context, chatID string) error 
 type stubTool struct {
 	name             string
 	requiresApproval bool
+	reason           string
+	approvalErr      error
 	result           json.RawMessage
 }
 
@@ -78,7 +81,19 @@ func (t stubTool) Description() string {
 	return "stub tool"
 }
 func (t stubTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
-func (t stubTool) RequiresApproval() bool      { return t.requiresApproval }
+func (t stubTool) RequiresApproval(context.Context, json.RawMessage) (ApprovalDecision, error) {
+	if t.approvalErr != nil {
+		return ApprovalDecision{}, t.approvalErr
+	}
+	if !t.requiresApproval {
+		return ApprovalDecision{}, nil
+	}
+	reason := t.reason
+	if reason == "" {
+		reason = "approval required"
+	}
+	return ApprovalDecision{Required: true, Reason: reason}, nil
+}
 func (t stubTool) Execute(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	return t.result, nil
 }
@@ -453,6 +468,9 @@ func TestRunDoesNotExecuteToolPendingApproval(t *testing.T) {
 	if updatedAssistant.ToolCalls[0].ExecutionStatus != ExecutionStatusPending {
 		t.Fatalf("ExecutionStatus = %q, want pending", updatedAssistant.ToolCalls[0].ExecutionStatus)
 	}
+	if updatedAssistant.ToolCalls[0].Reason != "approval required" {
+		t.Fatalf("Reason = %q", updatedAssistant.ToolCalls[0].Reason)
+	}
 }
 
 func TestRunWithUserInputDoesNotExecuteToolPendingApproval(t *testing.T) {
@@ -773,6 +791,7 @@ func TestListPendingToolCallsOnlyApprovalRequiredOnCurrentTurn(t *testing.T) {
 			Args:            json.RawMessage(`{"city":"Paris"}`),
 			ApprovalStatus:  ApprovalStatusPending,
 			ExecutionStatus: ExecutionStatusPending,
+			Reason:          "approval required",
 		},
 	})
 	if err := store.AddMessages(context.Background(), "chat-1", assistantMessage); err != nil {
@@ -797,6 +816,9 @@ func TestListPendingToolCallsOnlyApprovalRequiredOnCurrentTurn(t *testing.T) {
 	if pending[0].ToolCallID != "call_approval" {
 		t.Fatalf("ToolCallID = %q, want call_approval", pending[0].ToolCallID)
 	}
+	if pending[0].Reason != "approval required" {
+		t.Fatalf("Reason = %q", pending[0].Reason)
+	}
 }
 
 type failingStubTool struct {
@@ -805,6 +827,49 @@ type failingStubTool struct {
 
 func (t failingStubTool) Execute(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	return nil, fmt.Errorf("boom")
+}
+
+func TestRequiresApprovalErrorFailsCall(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryStore()
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, stubTool{
+		name:        "broken_policy",
+		approvalErr: fmt.Errorf("policy unavailable"),
+	})
+	assistantMessage := NewAssistantMessageWithToolCalls("", []ToolCall{
+		{
+			ID:              "call_a",
+			ToolName:        "broken_policy",
+			Args:            json.RawMessage(`{}`),
+			ApprovalStatus:  ApprovalStatusPending,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+	})
+	if err := store.AddMessages(context.Background(), "chat-1", assistantMessage); err != nil {
+		t.Fatal(err)
+	}
+	agent := &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         &stubModel{},
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+	if err := agent.Run(context.Background(), "chat-1"); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.Load(context.Background(), "chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolResultMessages(messages)) != 1 {
+		t.Fatalf("tool results = %d", len(toolResultMessages(messages)))
+	}
+	if !strings.Contains(toolResultMessages(messages)[0].Content, "execution_failed") {
+		t.Fatalf("result = %s", toolResultMessages(messages)[0].Content)
+	}
 }
 
 func TestRunAppendsToolMessageOnExecutionFailure(t *testing.T) {

@@ -3,6 +3,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	openaisdk "github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
@@ -73,9 +74,19 @@ func toChatCompletionNewParams(settings modelSettings, tools []gogent.Tool, hist
 			return openaisdk.ChatCompletionNewParams{}, err
 		}
 		params.Tools = sdkTools
+		params.ReasoningEffort = chatCompletionReasoningEffort(settings.model)
 	}
 
 	return params, nil
+}
+
+// chatCompletionReasoningEffort disables reasoning when tools are sent on Chat Completions.
+// GPT-5 and GPT-6 reject function tools unless reasoning_effort is "none".
+func chatCompletionReasoningEffort(model string) shared.ReasoningEffort {
+	if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6") {
+		return "none"
+	}
+	return ""
 }
 
 func toSDKChatMessages(systemPrompt string, history []gogent.Message) ([]openaisdk.ChatCompletionMessageParamUnion, error) {

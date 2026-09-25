@@ -22,6 +22,7 @@ type PendingToolCall struct {
 	ToolCallID string
 	ToolName   string
 	Args       json.RawMessage
+	Reason     string
 }
 
 // NewAgent creates an agent with the given dependencies and iteration limit.

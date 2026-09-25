@@ -55,9 +55,24 @@ func (a *Agent) processToolCalls(ctx context.Context, chatID string, messages []
 			continue
 		}
 
-		if tool.RequiresApproval() && toolCall.IsPendingApproval() {
-			paused = true
-			continue
+		if toolCall.IsPendingApproval() {
+			decision, err := tool.RequiresApproval(ctx, toolCall.Args)
+			if err != nil {
+				content := ToolCallExecutionErrorContent(toolCall.ToolName, err)
+				toolCall = failToolCall(toolCall, content)
+				updatedToolCalls[i] = toolCall
+				toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, content))
+				continue
+			}
+			if decision.Required {
+				toolCall.Reason = decision.Reason
+				if toolCall.Reason == "" {
+					toolCall.Reason = "approval required"
+				}
+				updatedToolCalls[i] = toolCall
+				paused = true
+				continue
+			}
 		}
 
 		if !toolCall.IsApproved() {

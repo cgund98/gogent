@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cgund98/gogent"
 	"github.com/invopop/jsonschema"
 )
 
@@ -31,7 +32,9 @@ type AdditionTool struct{}
 func (t *AdditionTool) Name() string                { return "addition" }
 func (t *AdditionTool) Description() string         { return "Add two numbers" }
 func (t *AdditionTool) Parameters() json.RawMessage { return additionSchema }
-func (t *AdditionTool) RequiresApproval() bool      { return false }
+func (t *AdditionTool) RequiresApproval(context.Context, json.RawMessage) (gogent.ApprovalDecision, error) {
+	return gogent.ApprovalDecision{}, nil
+}
 
 func (t *AdditionTool) Execute(_ context.Context, input json.RawMessage) (json.RawMessage, error) {
 	var args AdditionToolArgs
@@ -56,7 +59,9 @@ type MultiplicationTool struct{}
 func (t *MultiplicationTool) Name() string                { return "multiplication" }
 func (t *MultiplicationTool) Description() string         { return "Multiply two numbers" }
 func (t *MultiplicationTool) Parameters() json.RawMessage { return multiplicationSchema }
-func (t *MultiplicationTool) RequiresApproval() bool      { return true }
+func (t *MultiplicationTool) RequiresApproval(context.Context, json.RawMessage) (gogent.ApprovalDecision, error) {
+	return gogent.ApprovalDecision{Required: true, Reason: "approval required"}, nil
+}
 
 func (t *MultiplicationTool) Execute(_ context.Context, input json.RawMessage) (json.RawMessage, error) {
 	var args MultiplicationToolArgs

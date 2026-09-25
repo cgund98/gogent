@@ -59,8 +59,8 @@ func (t *AdditionTool) Execute(_ context.Context, input json.RawMessage) (json.R
 	return json.RawMessage(fmt.Sprintf(`{"result":%d}`, result)), nil
 }
 
-func (t *AdditionTool) RequiresApproval() bool {
-	return false
+func (t *AdditionTool) RequiresApproval(context.Context, json.RawMessage) (gogent.ApprovalDecision, error) {
+	return gogent.ApprovalDecision{}, nil
 }
 
 type MultiplicationToolArgs struct {
@@ -92,8 +92,8 @@ func (t *MultiplicationTool) Execute(_ context.Context, input json.RawMessage) (
 	return json.RawMessage(fmt.Sprintf(`{"result":%d}`, result)), nil
 }
 
-func (t *MultiplicationTool) RequiresApproval() bool {
-	return true
+func (t *MultiplicationTool) RequiresApproval(context.Context, json.RawMessage) (gogent.ApprovalDecision, error) {
+	return gogent.ApprovalDecision{Required: true, Reason: "approval required"}, nil
 }
 
 func main() {

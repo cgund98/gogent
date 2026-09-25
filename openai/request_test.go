@@ -47,6 +47,21 @@ func TestToChatCompletionNewParams(t *testing.T) {
 	if params.Tools[0].Function.Name != "get_weather" {
 		t.Fatalf("tool name = %q, want get_weather", params.Tools[0].Function.Name)
 	}
+	if params.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want empty for gpt-4o-mini", params.ReasoningEffort)
+	}
+}
+
+func TestGPT6ToolCallsDisableReasoning(t *testing.T) {
+	t.Parallel()
+
+	params, err := toChatCompletionNewParams(modelSettings{model: "gpt-6-sol"}, []gogent.Tool{stubTool{name: "read_file"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ReasoningEffort != "none" {
+		t.Fatalf("ReasoningEffort = %q, want none", params.ReasoningEffort)
+	}
 }
 
 type stubTool struct {
@@ -60,7 +75,9 @@ func (t stubTool) Description() string {
 func (t stubTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)
 }
-func (t stubTool) RequiresApproval() bool { return false }
+func (t stubTool) RequiresApproval(context.Context, json.RawMessage) (gogent.ApprovalDecision, error) {
+	return gogent.ApprovalDecision{}, nil
+}
 func (t stubTool) Execute(_ context.Context, _ json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(`{"temp_c":18}`), nil
 }
