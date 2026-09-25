@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/cgund98/gogent/compare/v0.3.0...v0.3.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* add provider documentation ([737cae9](https://github.com/cgund98/gogent/commit/737cae92dafaf649ad72c326601c020161790d50))
+* add provider documentation ([e0a46aa](https://github.com/cgund98/gogent/commit/e0a46aa52a34be91b6371ed0398afd3f0ec421a7))
+
 ## [0.3.0](https://github.com/cgund98/gogent/compare/v0.2.0...v0.3.0) (2026-09-25)
 
 
