@@ -42,5 +42,21 @@ func (m *Model) GenerateResponse(ctx context.Context, history []gogent.Message) 
 		return gogent.Message{}, errors.New("openai: empty choices in response")
 	}
 
-	return fromChatCompletionMessage(resp.Choices[0].Message)
+	message, err := fromChatCompletionMessage(resp.Choices[0].Message)
+	if err != nil {
+		return gogent.Message{}, err
+	}
+	message.Usage = usageFromCompletion(resp.Usage)
+	return message, nil
+}
+
+func usageFromCompletion(usage openaisdk.CompletionUsage) *gogent.Usage {
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.PromptTokensDetails.CachedTokens == 0 {
+		return nil
+	}
+	return &gogent.Usage{
+		Input:  int(usage.PromptTokens),
+		Output: int(usage.CompletionTokens),
+		Cached: int(usage.PromptTokensDetails.CachedTokens),
+	}
 }

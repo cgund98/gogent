@@ -15,12 +15,26 @@ const (
 	MessageRoleTool      MessageRole = "tool"
 )
 
+// Usage is the provider-reported token count for one model turn.
+// It is stored on the assistant message and is not sent back to the provider.
+type Usage struct {
+	Input  int `json:"input,omitempty"`
+	Output int `json:"output,omitempty"`
+	Cached int `json:"cached,omitempty"`
+}
+
+// Empty reports whether the provider sent no token counts.
+func (u *Usage) Empty() bool {
+	return u == nil || (u.Input == 0 && u.Output == 0 && u.Cached == 0)
+}
+
 type Message struct {
 	ID         string      `json:"id"`
 	Role       MessageRole `json:"role"`
 	Content    string      `json:"content"`
 	ToolCallID string      `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
+	Usage      *Usage      `json:"usage,omitempty"`
 }
 
 // NewUserMessage creates a user message with a generated ID.
