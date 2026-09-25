@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/cgund98/gogent/compare/v0.2.0...v0.3.0) (2026-09-25)
+
+
+### Features
+
+* support kimi model provider ([203aacc](https://github.com/cgund98/gogent/commit/203aacc1ca559d4fa7ab8487b13f60f2c8c02a12))
+* support kimi model provider ([29f05f9](https://github.com/cgund98/gogent/commit/29f05f9eb082d84954b58e83bc1ab5e0abd88e9b))
+
 ## [0.2.0](https://github.com/cgund98/gogent/compare/v0.1.0...v0.2.0) (2026-09-25)
 
 
