@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/cgund98/gogent/compare/v0.3.1...v0.3.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* add no thinking option for kimi ([#10](https://github.com/cgund98/gogent/issues/10)) ([4740b54](https://github.com/cgund98/gogent/commit/4740b548140092f91e9cb8debb40683aade835b4))
+
 ## [0.3.1](https://github.com/cgund98/gogent/compare/v0.3.0...v0.3.1) (2026-09-25)
 
 
