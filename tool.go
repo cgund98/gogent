@@ -52,11 +52,18 @@ func toolCallErrorPayload(code, message, toolName string) string {
 	return string(payload)
 }
 
+// ApprovalDecision is whether one tool call must pause, and why.
+// Reason is for the approval card. It is not sent to the model.
+type ApprovalDecision struct {
+	Required bool
+	Reason   string
+}
+
 type Tool interface {
 	Name() string
 	Description() string
 	Parameters() json.RawMessage
-	RequiresApproval() bool
+	RequiresApproval(ctx context.Context, args json.RawMessage) (ApprovalDecision, error)
 	Execute(ctx context.Context, args json.RawMessage) (json.RawMessage, error)
 }
 
@@ -67,6 +74,7 @@ type ToolCall struct {
 	ApprovalStatus  ApprovalStatus
 	ExecutionStatus ExecutionStatus
 	Result          json.RawMessage
+	Reason          string
 }
 
 // IsApproved reports whether the tool call has been approved for execution.

@@ -2,7 +2,7 @@ package gogent
 
 // listApprovalsRequired returns approval-required, unresolved tool calls on the
 // current assistant turn, in model tool-call order.
-func listApprovalsRequired(messages []Message, registry *ToolRegistry) []PendingToolCall {
+func listApprovalsRequired(messages []Message, _ *ToolRegistry) []PendingToolCall {
 	assistant, assistantIndex, ok := findUnresolvedToolTurn(messages)
 	if !ok {
 		return nil
@@ -17,11 +17,7 @@ func listApprovalsRequired(messages []Message, registry *ToolRegistry) []Pending
 		if !toolCall.IsPendingApproval() {
 			continue
 		}
-		if registry == nil {
-			continue
-		}
-		tool := registry.GetTool(toolCall.ToolName)
-		if tool == nil || !tool.RequiresApproval() {
+		if toolCall.Reason == "" {
 			continue
 		}
 		out = append(out, PendingToolCall{
@@ -29,6 +25,7 @@ func listApprovalsRequired(messages []Message, registry *ToolRegistry) []Pending
 			ToolCallID: toolCall.ID,
 			ToolName:   toolCall.ToolName,
 			Args:       toolCall.Args,
+			Reason:     toolCall.Reason,
 		})
 	}
 	return out

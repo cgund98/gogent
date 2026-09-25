@@ -17,6 +17,17 @@ type Model struct {
 	toolRegistry *gogent.ToolRegistry
 }
 
+func (m *Model) SetSystemPrompt(prompt string) {
+	m.settings.systemPrompt = prompt
+}
+
+func (m *Model) SystemPrompt() string {
+	if m == nil {
+		return ""
+	}
+	return m.settings.systemPrompt
+}
+
 func (m *Model) GenerateResponse(ctx context.Context, history []gogent.Message) (gogent.Message, error) {
 	params, err := toChatCompletionNewParams(m.settings, m.tools, history)
 	if err != nil {
