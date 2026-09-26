@@ -18,6 +18,7 @@ Provider-specific wiring lives in separate packages. See [ARCHITECTURE.md](ARCHI
 |---------|-----|
 | [`openai`](openai) | OpenAI Chat Completions (`https://api.openai.com/v1`). Pass your own client to `openai.NewChat`. The default model is `gpt-4o-mini`. |
 | [`kimi`](kimi) | Moonshot Kimi Chat Completions (`https://api.moonshot.ai/v1`). `kimi.NewChat` builds a client for that API and returns the same chat builder. Pass `kimi.WithoutThinking()` to send `thinking: {"type": "disabled"}` so K2.6 answers without its reasoning pass. |
+| [`deepseek`](deepseek) | DeepSeek Chat Completions (`https://api.deepseek.com`). `deepseek.NewChat` builds a client for that API and returns the same chat builder. Pass `deepseek.WithThinking()` to send `thinking: {"type": "enabled"}` so the model includes a reasoning pass. |
 
 ## Examples
 

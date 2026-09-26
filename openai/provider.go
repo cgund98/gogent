@@ -101,6 +101,11 @@ func (b *ModelBuilder) WithJSONResponse() *ModelBuilder {
 	return b.WithResponseFormat(json.RawMessage(`{"type":"json_object"}`))
 }
 
+func (b *ModelBuilder) WithReasoningEffort(reasoningEffort string) *ModelBuilder {
+	b.settings.reasoningEffort = &reasoningEffort
+	return b
+}
+
 func (b *ModelBuilder) Build() (*Model, error) {
 	if b.client == nil {
 		return nil, errors.New("openai: client is required")
@@ -123,6 +128,18 @@ func (b *ModelBuilder) Build() (*Model, error) {
 	}
 	if b.settings.maxTokens != nil && *b.settings.maxTokens <= 0 {
 		return nil, errors.New("openai: max tokens must be greater than zero")
+	}
+	if b.settings.reasoningEffort != nil {
+		valid := false
+		for _, v := range []string{"none", "low", "medium", "high"} {
+			if *b.settings.reasoningEffort == v {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, errors.New("openai: reasoning_effort must be one of none, low, medium, high")
+		}
 	}
 
 	settings := b.settings
