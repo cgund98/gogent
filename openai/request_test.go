@@ -64,6 +64,72 @@ func TestGPT6ToolCallsDisableReasoning(t *testing.T) {
 	}
 }
 
+func TestExplicitReasoningEffortOverridesAutoDisable(t *testing.T) {
+	t.Parallel()
+
+	high := "high"
+	settings := modelSettings{
+		model:           "gpt-6-sol",
+		reasoningEffort: &high,
+	}
+
+	params, err := toChatCompletionNewParams(settings, []gogent.Tool{stubTool{name: "read_file"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", params.ReasoningEffort)
+	}
+}
+
+func TestExplicitNoneDisablesReasoning(t *testing.T) {
+	t.Parallel()
+
+	none := "none"
+	settings := modelSettings{
+		model:           "gpt-4o-mini",
+		reasoningEffort: &none,
+	}
+
+	params, err := toChatCompletionNewParams(settings, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ReasoningEffort != "none" {
+		t.Fatalf("ReasoningEffort = %q, want none", params.ReasoningEffort)
+	}
+}
+
+func TestNoExplicitValueNoToolsNoReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	params, err := toChatCompletionNewParams(modelSettings{model: "gpt-4o-mini"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ReasoningEffort != "" {
+		t.Fatalf("ReasoningEffort = %q, want empty", params.ReasoningEffort)
+	}
+}
+
+func TestExplicitHighPassedThroughForNonReasoningModel(t *testing.T) {
+	t.Parallel()
+
+	high := "high"
+	settings := modelSettings{
+		model:           "gpt-4o-mini",
+		reasoningEffort: &high,
+	}
+
+	params, err := toChatCompletionNewParams(settings, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if params.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", params.ReasoningEffort)
+	}
+}
+
 type stubTool struct {
 	name string
 }

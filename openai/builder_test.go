@@ -114,6 +114,16 @@ func TestModelBuilderBuildValidation(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "invalid reasoning effort",
+			builder: &ModelBuilder{
+				client: &client,
+				settings: modelSettings{
+					model:           defaultModel,
+					reasoningEffort: ptr("extreme"),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -122,6 +132,59 @@ func TestModelBuilderBuildValidation(t *testing.T) {
 
 			if _, err := tt.builder.Build(); err == nil {
 				t.Fatal("Build() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestModelBuilderWithReasoningEffort(t *testing.T) {
+	t.Parallel()
+
+	client := openaisdk.Client{}
+
+	tests := []struct {
+		name           string
+		effort         string
+		wantInSettings string
+	}{
+		{
+			name:           "high",
+			effort:         "high",
+			wantInSettings: "high",
+		},
+		{
+			name:           "none",
+			effort:         "none",
+			wantInSettings: "none",
+		},
+		{
+			name:           "low",
+			effort:         "low",
+			wantInSettings: "low",
+		},
+		{
+			name:           "medium",
+			effort:         "medium",
+			wantInSettings: "medium",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			model, err := NewChat(&client, gogent.NewToolRegistry()).
+				WithModel("gpt-4o").
+				WithReasoningEffort(tt.effort).
+				Build()
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			if model.settings.reasoningEffort == nil {
+				t.Fatal("reasoningEffort is nil, want set")
+			}
+			if *model.settings.reasoningEffort != tt.wantInSettings {
+				t.Fatalf("reasoningEffort = %q, want %q", *model.settings.reasoningEffort, tt.wantInSettings)
 			}
 		})
 	}

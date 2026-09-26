@@ -18,4 +18,5 @@ type modelSettings struct {
 	user              string
 	parallelToolCalls *bool
 	responseFormat    json.RawMessage
+	reasoningEffort   *string
 }

@@ -74,16 +74,21 @@ func toChatCompletionNewParams(settings modelSettings, tools []gogent.Tool, hist
 			return openaisdk.ChatCompletionNewParams{}, err
 		}
 		params.Tools = sdkTools
-		params.ReasoningEffort = chatCompletionReasoningEffort(settings.model)
 	}
+	params.ReasoningEffort = chatCompletionReasoningEffort(settings.model, settings.reasoningEffort, len(tools) > 0)
 
 	return params, nil
 }
 
-// chatCompletionReasoningEffort disables reasoning when tools are sent on Chat Completions.
-// GPT-5 and GPT-6 reject function tools unless reasoning_effort is "none".
-func chatCompletionReasoningEffort(model string) shared.ReasoningEffort {
-	if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6") {
+// chatCompletionReasoningEffort returns the reasoning effort to use.
+// An explicit user setting always takes precedence.
+// When no explicit value is set and tools are present, GPT-5 and GPT-6
+// models require reasoning_effort to be "none".
+func chatCompletionReasoningEffort(model string, reasoningEffort *string, hasTools bool) shared.ReasoningEffort {
+	if reasoningEffort != nil {
+		return shared.ReasoningEffort(*reasoningEffort)
+	}
+	if hasTools && (strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6")) {
 		return "none"
 	}
 	return ""
