@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/cgund98/gogent/compare/v0.3.2...v0.4.0) (2026-09-26)
+
+
+### Features
+
+* support deepseek and model effort ([#12](https://github.com/cgund98/gogent/issues/12)) ([878ba7f](https://github.com/cgund98/gogent/commit/878ba7f65891529cdebb957edcb6f8be1085b1f7))
+
 ## [0.3.2](https://github.com/cgund98/gogent/compare/v0.3.1...v0.3.2) (2026-09-25)
 
 
