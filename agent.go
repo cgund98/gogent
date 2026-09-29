@@ -37,9 +37,30 @@ func NewAgent(store MessageStore, broadcaster ChatEventBroadcaster, model Model,
 	}
 }
 
-// RunWithUserInput appends a user message to the chat and runs the agent loop,
-// including a model turn once any pending tool work is complete.
+// ErrAwaitingApproval reports that RunWithUserInput was called while tool calls
+// on the current turn still await approval.
+var ErrAwaitingApproval = errors.New("tool calls are awaiting approval")
+
+// RunWithUserInput settles outstanding tool work, appends a user message to the
+// chat, and runs the agent loop, including a model turn once any pending tool
+// work is complete.
+//
+// Tool work is settled first so the new user message cannot land between an
+// assistant turn that requested tools and the tool messages answering it:
+// providers reject that transcript, and the turn could never be repaired while
+// it stayed unresolved. When the outstanding turn still awaits approval, the
+// message is not recorded and ErrAwaitingApproval is returned.
 func (a *Agent) RunWithUserInput(ctx context.Context, chatID string, userInput string) error {
+	messages, err := a.store.Load(ctx, chatID)
+	if err != nil {
+		return fmt.Errorf("failed to load messages: %w", err)
+	}
+	if _, paused, err := a.findAndApplyUnresolvedToolCalls(ctx, chatID, messages); err != nil {
+		return err
+	} else if paused {
+		return ErrAwaitingApproval
+	}
+
 	userMessage := NewUserMessage(userInput)
 	if err := a.addMessages(ctx, chatID, userMessage); err != nil {
 		return fmt.Errorf("failed to add message: %w", err)

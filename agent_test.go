@@ -3,6 +3,7 @@ package gogent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -988,5 +989,254 @@ func TestResolvedToolCallIDsForTurnIgnoresEarlierTranscript(t *testing.T) {
 	resolved := resolvedToolCallIDsForTurn(messages, 2)
 	if _, ok := resolved["call_shared"]; ok {
 		t.Fatal("tool result before assistant turn should not resolve that turn's call")
+	}
+}
+
+// A call that fails while a sibling on the same turn awaits approval used to
+// keep ApprovalStatus pending, so AllToolCallsApprovalSettled stayed false and
+// approving the sibling never resumed the run.
+func TestFailedToolCallDoesNotBlockApprovalOfSibling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	executeCount := 0
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("Read it.")}}
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, trackingStubTool{
+		stubTool: stubTool{
+			name:             "read_file",
+			requiresApproval: true,
+			result:           json.RawMessage(`{"content":"ok"}`),
+		},
+		executeCount: &executeCount,
+	})
+
+	// call_missing names a tool that is not registered, as delegate is not in
+	// every gopi mode's registry. call_read needs approval.
+	assistantMessage := NewAssistantMessageWithToolCalls("", []ToolCall{
+		{
+			ID:              "call_missing",
+			ToolName:        "delegate",
+			Args:            json.RawMessage(`{"task":"investigate"}`),
+			ApprovalStatus:  ApprovalStatusPending,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+		{
+			ID:              "call_read",
+			ToolName:        "read_file",
+			Args:            json.RawMessage(`{"path":"cmd/gopi/main.go"}`),
+			ApprovalStatus:  ApprovalStatusPending,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+	})
+	if err := store.AddMessages(ctx, "chat-1", assistantMessage); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         model,
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+
+	if err := agent.Run(ctx, "chat-1"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if executeCount != 0 {
+		t.Fatalf("Execute() calls = %d, want 0 while approval is pending", executeCount)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	updated, ok := assistantMessageByID(messages, assistantMessage.ID)
+	if !ok {
+		t.Fatal("assistant message not found")
+	}
+	if updated.ToolCalls[0].ExecutionStatus != ExecutionStatusFailed {
+		t.Fatalf("failed call ExecutionStatus = %q, want failed", updated.ToolCalls[0].ExecutionStatus)
+	}
+	if updated.ToolCalls[0].IsPendingApproval() {
+		t.Fatal("failed call still awaits approval, so the turn can never settle")
+	}
+
+	if err := agent.ApproveToolCall(ctx, "chat-1", assistantMessage.ID, "call_read"); err != nil {
+		t.Fatalf("ApproveToolCall() error = %v", err)
+	}
+	if executeCount != 1 {
+		t.Fatalf("Execute() calls after approval = %d, want 1", executeCount)
+	}
+	if model.calls != 1 {
+		t.Fatalf("GenerateResponse calls after approval = %d, want 1", model.calls)
+	}
+
+	messages, err = store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(toolResultMessages(messages)) != 2 {
+		t.Fatalf("tool result messages = %d, want 2 (not-found plus executed)", len(toolResultMessages(messages)))
+	}
+}
+
+// A tool call that already failed must not run again when its tool message is
+// restored, because the result is already recorded on the call.
+func TestFailedToolCallIsNotExecutedAgain(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	executeCount := 0
+
+	store := newMemoryStore()
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, trackingStubTool{
+		stubTool:     stubTool{name: "read_file", result: json.RawMessage(`{"content":"ok"}`)},
+		executeCount: &executeCount,
+	})
+
+	assistantMessage := NewAssistantMessageWithToolCalls("", []ToolCall{
+		{
+			ID:              "call_a",
+			ToolName:        "read_file",
+			Args:            json.RawMessage(`{"path":"go.mod"}`),
+			ApprovalStatus:  ApprovalStatusApproved,
+			ExecutionStatus: ExecutionStatusFailed,
+			Result:          json.RawMessage(ToolCallExecutionErrorContent("read_file", fmt.Errorf("boom"))),
+		},
+	})
+	if err := store.AddMessages(ctx, "chat-1", assistantMessage); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         &stubModel{responses: []Message{NewAssistantMessage("Recovered.")}},
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+
+	if err := agent.Run(ctx, "chat-1"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if executeCount != 0 {
+		t.Fatalf("Execute() calls = %d, want 0 for an already failed call", executeCount)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(toolResultMessages(messages)) != 1 {
+		t.Fatalf("tool result messages = %d, want 1 restored failure", len(toolResultMessages(messages)))
+	}
+	if !strings.Contains(toolResultMessages(messages)[0].Content, "execution_failed") {
+		t.Fatalf("tool result = %s, want the recorded failure", toolResultMessages(messages)[0].Content)
+	}
+}
+
+// A user message must never be recorded between an assistant turn that
+// requested tools and the tool messages answering it, and it must not be
+// recorded at all while that turn still awaits approval.
+func TestRunWithUserInputKeepsToolResultsBeforeUserMessage(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	store := newMemoryStore()
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, stubTool{name: "read_file", result: json.RawMessage(`{"content":"ok"}`)})
+
+	assistantMessage := NewAssistantMessageWithToolCalls("", []ToolCall{
+		{
+			ID:              "call_a",
+			ToolName:        "read_file",
+			Args:            json.RawMessage(`{"path":"go.mod"}`),
+			ApprovalStatus:  ApprovalStatusPending,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+	})
+	if err := store.AddMessages(ctx, "chat-1", assistantMessage); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         &stubModel{responses: []Message{NewAssistantMessage("Done.")}},
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+
+	if err := agent.RunWithUserInput(ctx, "chat-1", "carry on"); err != nil {
+		t.Fatalf("RunWithUserInput() error = %v", err)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(messages) != 4 {
+		t.Fatalf("len(messages) = %d, want 4 (assistant, tool, user, assistant)", len(messages))
+	}
+	if messages[1].Role != MessageRoleTool || messages[1].ToolCallID != "call_a" {
+		t.Fatalf("messages[1] = %+v, want the tool result for call_a", messages[1])
+	}
+	if messages[2].Role != MessageRoleUser {
+		t.Fatalf("messages[2] role = %q, want user after the tool result", messages[2].Role)
+	}
+}
+
+func TestRunWithUserInputRefusedWhileApprovalPending(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("should not be called")}}
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, stubTool{name: "delete_user", requiresApproval: true})
+
+	assistantMessage := NewAssistantMessageWithToolCalls("", []ToolCall{
+		{
+			ID:              "call_a",
+			ToolName:        "delete_user",
+			Args:            json.RawMessage(`{"id":"123"}`),
+			ApprovalStatus:  ApprovalStatusPending,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+	})
+	if err := store.AddMessages(ctx, "chat-1", assistantMessage); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         model,
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+
+	if err := agent.RunWithUserInput(ctx, "chat-1", "Continue"); !errors.Is(err, ErrAwaitingApproval) {
+		t.Fatalf("RunWithUserInput() error = %v, want ErrAwaitingApproval", err)
+	}
+	if model.calls != 0 {
+		t.Fatalf("GenerateResponse calls = %d, want 0 while approval is pending", model.calls)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	for _, message := range messages {
+		if message.Role == MessageRoleUser {
+			t.Fatalf("user message %q was recorded while approval is pending", message.Content)
+		}
 	}
 }

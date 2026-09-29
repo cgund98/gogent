@@ -25,7 +25,9 @@ func (a *Agent) processToolCalls(ctx context.Context, chatID string, messages []
 			continue
 		}
 
-		if toolCall.ExecutionStatus == ExecutionStatusCompleted {
+		// A call that already reached a terminal outcome in an earlier pass needs
+		// only its tool message restored. Re-running it would repeat side effects.
+		if toolCall.ExecutionStatus == ExecutionStatusCompleted || toolCall.ExecutionStatus == ExecutionStatusFailed {
 			if len(toolCall.Result) > 0 {
 				toolResultMessages = append(
 					toolResultMessages,
@@ -105,9 +107,18 @@ func (a *Agent) processToolCalls(ctx context.Context, chatID string, messages []
 	return toolResultMessages, paused, nil
 }
 
+// failToolCall records a terminal failure for one call. A call that still
+// awaited approval is settled as approved, because a failed call can never need
+// that approval and leaving it pending would strand the whole turn: no tool
+// message is missing for it, but AllToolCallsApprovalSettled would stay false
+// and ApproveToolCall would never resume the run. A rejected call keeps its
+// rejected status.
 func failToolCall(toolCall ToolCall, content string) ToolCall {
 	toolCall.ExecutionStatus = ExecutionStatusFailed
 	toolCall.Result = json.RawMessage(content)
+	if toolCall.IsPendingApproval() {
+		toolCall.ApprovalStatus = ApprovalStatusApproved
+	}
 	return toolCall
 }
 
