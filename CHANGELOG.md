@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/cgund98/gogent/compare/v0.4.0...v0.4.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* unblock agent execution when tool call fails ([#14](https://github.com/cgund98/gogent/issues/14)) ([e7cabb1](https://github.com/cgund98/gogent/commit/e7cabb1d0b5bb3e613b42252b069c37778610b3e))
+
 ## [0.4.0](https://github.com/cgund98/gogent/compare/v0.3.2...v0.4.0) (2026-09-26)
 
 
