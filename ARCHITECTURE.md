@@ -262,6 +262,26 @@ Gogent's message shape mirrors the OpenAI Chat Completions tool-calling protocol
 
 The model adapter is responsible for serializing gogent messages to the provider schema on the way out and parsing provider responses back into `Message` and `ToolCall` values on the way in. The agent loop itself is provider-agnostic.
 
+## Provider mapping (Anthropic)
+
+The `anthropic` package targets the Messages API (`POST /v1/messages`), which differs from Chat Completions in three ways: `max_tokens` is required, the system prompt is a top-level `system` field rather than a message, and tool traffic uses `tool_use` / `tool_result` content blocks instead of `tool_calls` and a `tool` role.
+
+| gogent | Anthropic Messages |
+|--------|--------------------|
+| system prompt | top-level `system` text block (not a message) |
+| `user` message | `role: user` with a text block |
+| `assistant` message (text) | `role: assistant` with a text block |
+| `assistant` message (tool request) | `role: assistant` with `tool_use` blocks |
+| `tool` message | `role: user` with a `tool_result` block |
+| `ToolCall.ID` | `tool_use.id` / `tool_result.tool_use_id` |
+| `ToolCall.ToolName` | `tool_use.name` |
+| `ToolCall.Args` | `tool_use.input` (decoded JSON, not a string) |
+| `Tool.Parameters()` | `tools[].input_schema` (`properties` + `required`) |
+
+Because Anthropic has no `tool` role, a run of `tool` messages is coalesced into a single `user` turn holding one `tool_result` block per call — the shape the API expects to follow an assistant `tool_use` turn. Adjacent same-role messages are merged the same way the API merges them.
+
+Reasoning depth is set through the top-level `output_config.effort` field (`low`, `medium`, `high`, `xhigh`, `max`) via `anthropic.ModelBuilder.WithEffort`. It is omitted when unset, so the model default applies, and it needs no beta header. Approval-only `ToolCall` status changes are not sent to the provider, exactly as with OpenAI.
+
 ## Human-in-the-loop
 
 Tools may set `RequiresApproval()` to opt into manual review before execution. When the model requests such a tool:
