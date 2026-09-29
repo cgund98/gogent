@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/cgund98/gogent/compare/v0.4.1...v0.5.0) (2026-09-29)
+
+
+### Features
+
+* support anthropic model provider ([#16](https://github.com/cgund98/gogent/issues/16)) ([6034341](https://github.com/cgund98/gogent/commit/60343416267c3e98c5810112d44a2cd2a1bc3d1e))
+
 ## [0.4.1](https://github.com/cgund98/gogent/compare/v0.4.0...v0.4.1) (2026-09-29)
 
 
