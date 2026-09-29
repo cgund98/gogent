@@ -25,9 +25,9 @@ The `internal/` tree is legacy application scaffolding and is not part of the pu
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full lifecycle. In code:
 
-- **`run` / `findAndApplyUnresolvedToolCalls`** (`agent.go`) — orchestration only. Each iteration resolves tool work first, then optionally calls the model. Tool resolution does not count toward `maxIterations`.
+- **`run` / `findAndApplyUnresolvedToolCalls`** (`agent.go`) — orchestration only. Each iteration resolves tool work first, then optionally calls the model. Tool resolution does not count toward `maxIterations`. `RunWithUserInput` settles outstanding tool work before it records the `user` message, so a user message can never land between an assistant tool request and its `tool` messages; it returns `ErrAwaitingApproval` when that turn still awaits approval.
 - **`findUnresolvedToolTurn`, `resolvedToolCallIDsForTurn`** (`tool_turn.go`) — which assistant turn is outstanding; a `tool` message counts only when it appears **after** that assistant message.
-- **`processToolCalls`** (`tool_execution.go`) — approve/reject/execute/fail individual calls and append `tool` transcript messages.
+- **`processToolCalls`** (`tool_execution.go`) — approve/reject/execute/fail individual calls and append `tool` transcript messages. A failed call is settled (`ApprovalStatus` approved, unless it was rejected) so it cannot hold its turn open for an approval that will never come, and a call that already reached `completed` or `failed` is never executed twice — a later pass only restores its `tool` message from `ToolCall.Result`.
 
 Do not duplicate tool execution in `run`; new tool requests from the model are handled on the next loop iteration via `findAndApplyUnresolvedToolCalls`.
 

@@ -96,6 +96,8 @@ flowchart TD
 
 **Do not append for the model:** pure status changes such as `pending` → `approved`, or in-progress execution state. User feedback after a rejection is a separate `RunWithUserInput` call, not part of `RejectToolCall`.
 
+**Ordering:** a `tool` message is written in the same pass that settles its call, so the transcript reads `assistant` (tool request) → one `tool` message per call → the next turn. `RunWithUserInput` settles outstanding tool work *before* it records the new `user` message, so a user message can never separate a tool request from the results answering it. Providers reject that shape outright.
+
 ### Tool result payloads
 
 | Situation | Transcript `content` |
@@ -105,7 +107,7 @@ flowchart TD
 | Unknown tool name | `ToolCallNotFoundContent` — `{"error":"not_found",...}` |
 | `Tool.Execute` error | `ToolCallExecutionErrorContent` — `{"error":"execution_failed",...}` |
 
-Failed and unknown-tool calls mark the assistant `ToolCall` as `ExecutionStatusFailed` and still append a `tool` message so the model can recover on the next turn.
+Failed and unknown-tool calls mark the assistant `ToolCall` as `ExecutionStatusFailed` and still append a `tool` message so the model can recover on the next turn. A failure also **settles** the call — `ApprovalStatus` moves to `approved` unless the call was rejected — because a failed call can never need the approval it was waiting for. Leaving it pending would keep `AllToolCallsApprovalSettled` false and strand its siblings: approving one of them would never resume the run. A call that already reached `failed` or `completed` is never executed again; a later pass only restores its `tool` message from the recorded `Result`.
 
 The OpenAI adapter strips gogent-only `ToolCall` fields when serializing assistant messages. Only `id`, tool name, and arguments are sent to the provider.
 
@@ -175,11 +177,13 @@ sequenceDiagram
 
 **1. User input**
 
-The application calls `Agent.RunWithUserInput`, which creates a `user` message and persists it:
+The application calls `Agent.RunWithUserInput`. It settles any outstanding tool work first, then creates a `user` message and persists it:
 
 ```
 { role: user, content: "What's the weather in Paris and London?" }
 ```
+
+When the outstanding turn still awaits approval, no `user` message is recorded and `RunWithUserInput` returns `ErrAwaitingApproval`. The caller settles that turn with `ApproveToolCall` or `RejectToolCall` first.
 
 **2. Resolve outstanding tool work**
 
@@ -188,7 +192,7 @@ Before each model turn, the agent finds the current unresolved assistant turn an
 1. Resolve the tool from `ToolRegistry`.
 2. If the tool `RequiresApproval()` and the call is still `pending`, persist the assistant message and **pause** the run. Other calls on the same turn may already have been executed or rejected in the same pass.
 3. If the call is **rejected**, mark it failed, append a **`tool` message** with a denial payload (do not execute the tool), and continue with any remaining calls in the same turn.
-4. If the tool is **not registered**, append a structured `not_found` tool message and mark the call failed.
+4. If the tool is **not registered**, append a structured `not_found` tool message and mark the call failed, which also settles it.
 5. Otherwise auto-approve when approval is not required, set `ExecutionStatus` to `running`, execute the tool, and on success mark the call `completed`. On execution error, append a structured `execution_failed` tool message and mark the call failed.
 6. Create one **`tool` message per settled call** (result, rejection, or error) and persist it:
 
@@ -238,6 +242,7 @@ Example final assistant message:
 |---------|-----------|
 | Success | Assistant message with no `ToolCalls` |
 | Paused for approval | Tool with `RequiresApproval()` and call not yet approved on the current unresolved turn |
+| Refused user input | `RunWithUserInput` while the current turn still awaits approval → `ErrAwaitingApproval` |
 | Error | Store/model error, or `maxIterations` model turns exceeded |
 
 Tool execution failures and unknown tools do **not** stop the run; they append structured `tool` error messages so the model can recover on the next turn.
@@ -270,7 +275,7 @@ On a turn with multiple tool calls, calls that do not require approval (or are a
 
 ### Approve
 
-`ApproveToolCall` sets `ApprovalStatus` to `approved` on the requested call and broadcasts a `message_updated` event. The agent **does not run** until every `ToolCall` on that assistant message is settled (approved or rejected). Once all outstanding calls are settled, the agent runs once: executes approved calls, appends `tool` result messages, and continues to the next model turn when the tool turn is complete.
+`ApproveToolCall` sets `ApprovalStatus` to `approved` on the requested call and broadcasts a `message_updated` event. The agent **does not run** until every `ToolCall` on that assistant message is settled (approved or rejected). A call that already failed is settled automatically, so it never blocks the approval of a sibling. Once all outstanding calls are settled, the agent runs once: executes approved calls, appends `tool` result messages, and continues to the next model turn when the tool turn is complete.
 
 ### Reject
 
