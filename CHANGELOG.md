@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/cgund98/gogent/compare/v0.5.0...v0.5.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* remove effort when set to none in claude ([#18](https://github.com/cgund98/gogent/issues/18)) ([3c57a4b](https://github.com/cgund98/gogent/commit/3c57a4b639e105d19f201d680b01e47a1ffe1359))
+
 ## [0.5.0](https://github.com/cgund98/gogent/compare/v0.4.1...v0.5.0) (2026-09-29)
 
 
