@@ -94,7 +94,9 @@ func (b *ModelBuilder) WithStop(stopSequences ...string) *ModelBuilder {
 
 // WithEffort sets output_config.effort, which controls how many tokens the model
 // spends on a response. Accepted values are "low", "medium", "high", "xhigh",
-// and "max". When unset, the model default applies.
+// "max", and "none". A value of "none" omits output_config entirely, so no effort
+// parameter is sent — use it for models that do not support effort. When unset, the
+// same omission applies and the model default takes over.
 func (b *ModelBuilder) WithEffort(effort string) *ModelBuilder {
 	b.settings.effort = &effort
 	return b
@@ -125,7 +127,7 @@ func (b *ModelBuilder) Build() (*Model, error) {
 		return nil, errors.New("anthropic: top_k must be greater than zero")
 	}
 	if b.settings.effort != nil && !validEffort(*b.settings.effort) {
-		return nil, errors.New("anthropic: effort must be one of low, medium, high, xhigh, max")
+		return nil, errors.New("anthropic: effort must be one of none, low, medium, high, xhigh, max")
 	}
 
 	settings := b.settings
@@ -148,7 +150,7 @@ func (b *ModelBuilder) Build() (*Model, error) {
 }
 
 func validEffort(effort string) bool {
-	for _, v := range []string{"low", "medium", "high", "xhigh", "max"} {
+	for _, v := range []string{effortNone, "low", "medium", "high", "xhigh", "max"} {
 		if effort == v {
 			return true
 		}

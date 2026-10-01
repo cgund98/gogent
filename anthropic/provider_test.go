@@ -71,6 +71,7 @@ func TestModelBuilderWithEffort(t *testing.T) {
 		{name: "high", effort: "high"},
 		{name: "xhigh", effort: "xhigh"},
 		{name: "max", effort: "max"},
+		{name: "none", effort: "none"},
 	}
 
 	for _, tt := range tests {
