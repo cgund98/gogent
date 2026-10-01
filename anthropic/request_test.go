@@ -83,6 +83,69 @@ func TestToMessageNewParamsOmitsEffortAndDefaultsMaxTokens(t *testing.T) {
 	if len(params.Tools) != 0 {
 		t.Fatalf("Tools = %+v, want empty", params.Tools)
 	}
+	if _, ok := marshalledKeys(t, params)["output_config"]; ok {
+		t.Fatalf("output_config present in encoded params, want omitted: %v", params.OutputConfig)
+	}
+}
+
+func TestToMessageNewParamsEffortNoneOmitsOutputConfig(t *testing.T) {
+	settings := modelSettings{model: "claude-haiku-4-5", effort: ptr(effortNone)}
+
+	params, err := toMessageNewParams(settings, nil, []gogent.Message{gogent.NewUserMessage("hi")})
+	if err != nil {
+		t.Fatalf("toMessageNewParams() error = %v", err)
+	}
+	if params.OutputConfig.Effort != "" {
+		t.Fatalf("OutputConfig.Effort = %q, want empty", params.OutputConfig.Effort)
+	}
+	if _, ok := marshalledKeys(t, params)["output_config"]; ok {
+		t.Fatalf("output_config present in encoded params, want omitted: %v", params.OutputConfig)
+	}
+}
+
+// marshalledKeys encodes params as the SDK would send them and returns the decoded
+// top-level keys, so a test can assert a field is truly absent from the wire body.
+func marshalledKeys(t *testing.T, params anthropicsdk.MessageNewParams) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal(params) error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(params) error = %v", err)
+	}
+	return decoded
+}
+
+func TestGenerateResponseWithEffortNoneOmitsOutputConfig(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-haiku-4-5",`+
+			`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,`+
+			`"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	model, err := NewChat("test-key", gogent.NewToolRegistry(), WithBaseURL(server.URL)).
+		WithModel("claude-haiku-4-5").
+		WithEffort(effortNone).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	if _, err := model.GenerateResponse(context.Background(), []gogent.Message{gogent.NewUserMessage("hi")}); err != nil {
+		t.Fatalf("GenerateResponse() error = %v", err)
+	}
+	if _, ok := body["output_config"]; ok {
+		t.Fatalf("request output_config = %v, want omitted", body["output_config"])
+	}
 }
 
 func TestGenerateResponseEndToEnd(t *testing.T) {

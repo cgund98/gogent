@@ -280,7 +280,7 @@ The `anthropic` package targets the Messages API (`POST /v1/messages`), which di
 
 Because Anthropic has no `tool` role, a run of `tool` messages is coalesced into a single `user` turn holding one `tool_result` block per call — the shape the API expects to follow an assistant `tool_use` turn. Adjacent same-role messages are merged the same way the API merges them.
 
-Reasoning depth is set through the top-level `output_config.effort` field (`low`, `medium`, `high`, `xhigh`, `max`) via `anthropic.ModelBuilder.WithEffort`. It is omitted when unset, so the model default applies, and it needs no beta header. Approval-only `ToolCall` status changes are not sent to the provider, exactly as with OpenAI.
+Reasoning depth is set through the top-level `output_config.effort` field (`low`, `medium`, `high`, `xhigh`, `max`) via `anthropic.ModelBuilder.WithEffort`. It is omitted when unset, or when the effort is `"none"`, so the model default applies (and models that do not support effort get no such parameter); it needs no beta header. Approval-only `ToolCall` status changes are not sent to the provider, exactly as with OpenAI.
 
 ## Human-in-the-loop
 

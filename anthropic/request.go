@@ -41,7 +41,7 @@ func toMessageNewParams(settings modelSettings, tools []gogent.Tool, history []g
 	if len(settings.stopSequences) > 0 {
 		params.StopSequences = settings.stopSequences
 	}
-	if settings.effort != nil {
+	if settings.effort != nil && *settings.effort != effortNone {
 		params.OutputConfig = anthropicsdk.OutputConfigParam{
 			Effort: anthropicsdk.OutputConfigEffort(*settings.effort),
 		}
