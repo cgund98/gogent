@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type stubModel struct {
@@ -1238,5 +1240,478 @@ func TestRunWithUserInputRefusedWhileApprovalPending(t *testing.T) {
 		if message.Role == MessageRoleUser {
 			t.Fatalf("user message %q was recorded while approval is pending", message.Content)
 		}
+	}
+}
+
+// concurrentStubTool tracks how many Execute calls overlap. counters are pointers
+// so atomic state is shared even though the tool value is copied through the
+// registry. When release is non-nil, Execute blocks until it is closed.
+type concurrentStubTool struct {
+	stubTool
+	inFlight     *atomic.Int64
+	maxInFlight  *atomic.Int64
+	executeCount *atomic.Int64
+	release      <-chan struct{}
+}
+
+func (t concurrentStubTool) Execute(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	if t.executeCount != nil {
+		t.executeCount.Add(1)
+	}
+
+	cur := t.inFlight.Add(1)
+	defer t.inFlight.Add(-1)
+	for {
+		peak := t.maxInFlight.Load()
+		if cur <= peak || t.maxInFlight.CompareAndSwap(peak, cur) {
+			break
+		}
+	}
+
+	if t.release != nil {
+		select {
+		case <-t.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return t.result, nil
+}
+
+// timingStubTool sleeps per key so completion order can differ from call order.
+type timingStubTool struct {
+	stubTool
+	delays map[string]time.Duration
+}
+
+func (t timingStubTool) Execute(_ context.Context, args json.RawMessage) (json.RawMessage, error) {
+	var parsed struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(args, &parsed); err != nil {
+		return nil, err
+	}
+	if d := t.delays[parsed.Key]; d > 0 {
+		time.Sleep(d)
+	}
+	return json.RawMessage(fmt.Sprintf(`{"key":%q}`, parsed.Key)), nil
+}
+
+// gatedStubTool signals through started, then blocks until release or ctx is done.
+type gatedStubTool struct {
+	stubTool
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (t gatedStubTool) Execute(ctx context.Context, _ json.RawMessage) (json.RawMessage, error) {
+	if t.started != nil {
+		select {
+		case t.started <- struct{}{}:
+		default:
+		}
+	}
+	if t.release != nil {
+		select {
+		case <-t.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return t.result, nil
+}
+
+func approvedToolCalls(toolName string, ids ...string) []ToolCall {
+	calls := make([]ToolCall, 0, len(ids))
+	for _, id := range ids {
+		calls = append(calls, ToolCall{
+			ID:              id,
+			ToolName:        toolName,
+			Args:            json.RawMessage(`{}`),
+			ApprovalStatus:  ApprovalStatusApproved,
+			ExecutionStatus: ExecutionStatusPending,
+		})
+	}
+	return calls
+}
+
+func testAgent(store MessageStore, model Model, registry *ToolRegistry) *Agent {
+	return &Agent{
+		store:         store,
+		broadcaster:   NopBroadcaster{},
+		model:         model,
+		toolRegistry:  registry,
+		maxIterations: 3,
+	}
+}
+
+func waitForMaxInFlight(t *testing.T, maxInFlight *atomic.Int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for maxInFlight.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("max in-flight = %d after timeout, want at least %d", maxInFlight.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForRun(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for run to finish")
+		return nil
+	}
+}
+
+func TestProcessToolCallsDefaultConcurrencyLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var inFlight, maxInFlight atomic.Int64
+	release := make(chan struct{})
+
+	store := newMemoryStore()
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, concurrentStubTool{
+		stubTool:    stubTool{name: "lookup", result: json.RawMessage(`{"ok":true}`)},
+		inFlight:    &inFlight,
+		maxInFlight: &maxInFlight,
+		release:     release,
+	})
+
+	calls := approvedToolCalls("lookup", "call_0", "call_1", "call_2", "call_3", "call_4", "call_5")
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, &stubModel{responses: []Message{NewAssistantMessage("done")}}, registry)
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx, "chat-1") }()
+
+	waitForMaxInFlight(t, &maxInFlight, DefaultMaxConcurrentTools)
+	close(release)
+
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := maxInFlight.Load(); got != DefaultMaxConcurrentTools {
+		t.Fatalf("max in-flight = %d, want %d", got, DefaultMaxConcurrentTools)
+	}
+}
+
+func TestWithMaxConcurrentTools(t *testing.T) {
+	t.Parallel()
+
+	configured := NewAgent(newMemoryStore(), NopBroadcaster{}, &stubModel{}, NewToolRegistry(), 3, WithMaxConcurrentTools(2))
+	if got := configured.effectiveMaxConcurrentTools(); got != 2 {
+		t.Fatalf("effectiveMaxConcurrentTools() = %d, want 2", got)
+	}
+
+	zero := NewAgent(newMemoryStore(), NopBroadcaster{}, &stubModel{}, NewToolRegistry(), 3, WithMaxConcurrentTools(0))
+	if got := zero.effectiveMaxConcurrentTools(); got != DefaultMaxConcurrentTools {
+		t.Fatalf("effectiveMaxConcurrentTools() with 0 = %d, want %d", got, DefaultMaxConcurrentTools)
+	}
+
+	unset := NewAgent(newMemoryStore(), NopBroadcaster{}, &stubModel{}, NewToolRegistry(), 3)
+	if got := unset.effectiveMaxConcurrentTools(); got != DefaultMaxConcurrentTools {
+		t.Fatalf("default effectiveMaxConcurrentTools() = %d, want %d", got, DefaultMaxConcurrentTools)
+	}
+
+	literal := &Agent{}
+	if got := literal.effectiveMaxConcurrentTools(); got != DefaultMaxConcurrentTools {
+		t.Fatalf("zero-valued effectiveMaxConcurrentTools() = %d, want %d", got, DefaultMaxConcurrentTools)
+	}
+}
+
+func TestProcessToolCallsRespectsConfiguredLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	const limit = 2
+	var inFlight, maxInFlight atomic.Int64
+	release := make(chan struct{})
+
+	store := newMemoryStore()
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, concurrentStubTool{
+		stubTool:    stubTool{name: "lookup", result: json.RawMessage(`{"ok":true}`)},
+		inFlight:    &inFlight,
+		maxInFlight: &maxInFlight,
+		release:     release,
+	})
+
+	calls := approvedToolCalls("lookup", "call_0", "call_1", "call_2", "call_3")
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, &stubModel{responses: []Message{NewAssistantMessage("done")}}, registry)
+	agent.maxConcurrentTools = limit
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx, "chat-1") }()
+
+	waitForMaxInFlight(t, &maxInFlight, limit)
+	close(release)
+
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := maxInFlight.Load(); got != limit {
+		t.Fatalf("max in-flight = %d, want %d (limit must cap concurrency)", got, limit)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := len(toolResultMessages(messages)); got != len(calls) {
+		t.Fatalf("tool result messages = %d, want %d", got, len(calls))
+	}
+}
+
+func TestProcessToolCallsSequentialWhenPaused(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var inFlight, maxInFlight, executeCount atomic.Int64
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("should not be called")}}
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, concurrentStubTool{
+		stubTool:     stubTool{name: "auto", result: json.RawMessage(`{"ok":true}`)},
+		inFlight:     &inFlight,
+		maxInFlight:  &maxInFlight,
+		executeCount: &executeCount,
+	})
+	mustRegisterTool(t, registry, stubTool{name: "needs_approval", requiresApproval: true})
+
+	calls := approvedToolCalls("auto", "call_auto_0", "call_auto_1", "call_auto_2")
+	calls = append(calls, ToolCall{
+		ID:              "call_approval",
+		ToolName:        "needs_approval",
+		Args:            json.RawMessage(`{}`),
+		ApprovalStatus:  ApprovalStatusPending,
+		ExecutionStatus: ExecutionStatusPending,
+	})
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, model, registry)
+
+	if err := agent.Run(ctx, "chat-1"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if model.calls != 0 {
+		t.Fatalf("GenerateResponse calls = %d, want 0 while paused for approval", model.calls)
+	}
+	if got := executeCount.Load(); got != 3 {
+		t.Fatalf("approved tool Execute() calls = %d, want 3", got)
+	}
+	if got := maxInFlight.Load(); got != 1 {
+		t.Fatalf("max in-flight = %d, want 1 (paused turns execute sequentially)", got)
+	}
+}
+
+func TestProcessToolCallsPreserveOrder(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("done")}}
+	registry := NewToolRegistry()
+	// Earlier calls are slower, so completion order is the reverse of call order.
+	mustRegisterTool(t, registry, timingStubTool{
+		stubTool: stubTool{name: "lookup"},
+		delays: map[string]time.Duration{
+			"a": 40 * time.Millisecond,
+			"b": 30 * time.Millisecond,
+			"c": 20 * time.Millisecond,
+			"d": 10 * time.Millisecond,
+			"e": 0,
+		},
+	})
+
+	keys := []string{"a", "b", "c", "d", "e"}
+	calls := make([]ToolCall, 0, len(keys))
+	for _, key := range keys {
+		calls = append(calls, ToolCall{
+			ID:              fmt.Sprintf("call_%s", key),
+			ToolName:        "lookup",
+			Args:            json.RawMessage(fmt.Sprintf(`{"key":%q}`, key)),
+			ApprovalStatus:  ApprovalStatusApproved,
+			ExecutionStatus: ExecutionStatusPending,
+		})
+	}
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, model, registry)
+	if err := agent.Run(ctx, "chat-1"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	toolMessages := toolResultMessages(messages)
+	if len(toolMessages) != len(keys) {
+		t.Fatalf("tool result messages = %d, want %d", len(toolMessages), len(keys))
+	}
+	for i, key := range keys {
+		wantID := fmt.Sprintf("call_%s", key)
+		if toolMessages[i].ToolCallID != wantID {
+			t.Fatalf("tool message %d ToolCallID = %q, want %q", i, toolMessages[i].ToolCallID, wantID)
+		}
+		wantContent := fmt.Sprintf(`{"key":%q}`, key)
+		if toolMessages[i].Content != wantContent {
+			t.Fatalf("tool message %d Content = %q, want %q", i, toolMessages[i].Content, wantContent)
+		}
+	}
+}
+
+func TestToolFailureDoesNotCancelSiblings(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("Recovered.")}}
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, failingStubTool{stubTool: stubTool{name: "boom"}})
+	mustRegisterTool(t, registry, gatedStubTool{
+		stubTool: stubTool{name: "slow", result: json.RawMessage(`{"slow":"ok"}`)},
+		started:  started,
+		release:  release,
+	})
+
+	calls := []ToolCall{
+		{
+			ID:              "call_fail",
+			ToolName:        "boom",
+			Args:            json.RawMessage(`{}`),
+			ApprovalStatus:  ApprovalStatusApproved,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+		{
+			ID:              "call_slow",
+			ToolName:        "slow",
+			Args:            json.RawMessage(`{}`),
+			ApprovalStatus:  ApprovalStatusApproved,
+			ExecutionStatus: ExecutionStatusPending,
+		},
+	}
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, model, registry)
+
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx, "chat-1") }()
+
+	// The failing call settles first; the slow sibling must still be running.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow sibling never started")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("caller ctx canceled after sibling failure: %v", err)
+	}
+	close(release)
+
+	if err := waitForRun(t, done); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if model.calls != 1 {
+		t.Fatalf("GenerateResponse calls = %d, want 1", model.calls)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	toolMessages := toolResultMessages(messages)
+	if len(toolMessages) != 2 {
+		t.Fatalf("tool result messages = %d, want 2 (a failure must not skip its sibling)", len(toolMessages))
+	}
+	if toolMessages[0].ToolCallID != "call_fail" || !strings.Contains(toolMessages[0].Content, "execution_failed") {
+		t.Fatalf("messages[0] = %+v, want execution_failed for call_fail", toolMessages[0])
+	}
+	if toolMessages[1].ToolCallID != "call_slow" || toolMessages[1].Content != `{"slow":"ok"}` {
+		t.Fatalf("messages[1] = %+v, want the slow sibling's real result", toolMessages[1])
+	}
+
+	updated, ok := assistantMessageByID(messages, messages[0].ID)
+	if !ok {
+		t.Fatal("assistant message not found")
+	}
+	if updated.ToolCalls[0].ExecutionStatus != ExecutionStatusFailed {
+		t.Fatalf("call_fail ExecutionStatus = %q, want failed", updated.ToolCalls[0].ExecutionStatus)
+	}
+	if updated.ToolCalls[1].ExecutionStatus != ExecutionStatusCompleted {
+		t.Fatalf("call_slow ExecutionStatus = %q, want completed", updated.ToolCalls[1].ExecutionStatus)
+	}
+}
+
+func TestConcurrentToolFailuresAreIsolated(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	store := newMemoryStore()
+	model := &stubModel{responses: []Message{NewAssistantMessage("Recovered.")}}
+	registry := NewToolRegistry()
+	mustRegisterTool(t, registry, failingStubTool{stubTool: stubTool{name: "boom"}})
+	mustRegisterTool(t, registry, stubTool{name: "ok", result: json.RawMessage(`{"ok":true}`)})
+
+	calls := []ToolCall{
+		{ID: "call_ok_0", ToolName: "ok", Args: json.RawMessage(`{}`), ApprovalStatus: ApprovalStatusApproved, ExecutionStatus: ExecutionStatusPending},
+		{ID: "call_fail", ToolName: "boom", Args: json.RawMessage(`{}`), ApprovalStatus: ApprovalStatusApproved, ExecutionStatus: ExecutionStatusPending},
+		{ID: "call_ok_1", ToolName: "ok", Args: json.RawMessage(`{}`), ApprovalStatus: ApprovalStatusApproved, ExecutionStatus: ExecutionStatusPending},
+	}
+	if err := store.AddMessages(ctx, "chat-1", NewAssistantMessageWithToolCalls("", calls)); err != nil {
+		t.Fatalf("AddMessages() error = %v", err)
+	}
+
+	agent := testAgent(store, model, registry)
+	if err := agent.Run(ctx, "chat-1"); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if model.calls != 1 {
+		t.Fatalf("GenerateResponse calls = %d, want 1", model.calls)
+	}
+
+	messages, err := store.Load(ctx, "chat-1")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	toolMessages := toolResultMessages(messages)
+	if len(toolMessages) != 3 {
+		t.Fatalf("tool result messages = %d, want 3", len(toolMessages))
+	}
+	for i, wantID := range []string{"call_ok_0", "call_fail", "call_ok_1"} {
+		if toolMessages[i].ToolCallID != wantID {
+			t.Fatalf("tool message %d ToolCallID = %q, want %q", i, toolMessages[i].ToolCallID, wantID)
+		}
+	}
+	if !strings.Contains(toolMessages[1].Content, "execution_failed") {
+		t.Fatalf("failed call content = %q, want execution_failed", toolMessages[1].Content)
+	}
+	if toolMessages[0].Content != `{"ok":true}` || toolMessages[2].Content != `{"ok":true}` {
+		t.Fatalf("successful calls = %q, %q, want real results", toolMessages[0].Content, toolMessages[2].Content)
 	}
 }
