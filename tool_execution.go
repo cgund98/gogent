@@ -5,98 +5,126 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
+
+// toolCallOutcome is the settled state of one tool call on a turn after the
+// decide phase, and its terminal state after the execute phase.
+type toolCallOutcome struct {
+	toolCall       ToolCall
+	tool           Tool     // resolved tool, nil when the call is not runnable
+	needsExecution bool     // approved and ready to run in the execute phase
+	resultMessage  *Message // non-nil once settled (result, reject, error, or restore)
+}
 
 // processToolCalls executes, rejects, or skips each unresolved tool call on the
 // given assistant message (matched by message ID and tool call ID). It returns
 // tool result messages to append, and paused=true when any call still awaits approval.
+//
+// It runs in three phases: decide (sequential, order-preserving), execute
+// (concurrent when the turn is fully executable), and assemble (sequential, so
+// tool messages keep model tool-call order).
 func (a *Agent) processToolCalls(ctx context.Context, chatID string, messages []Message, assistant Message, assistantIndex int) ([]Message, bool, error) {
 	resolved := resolvedToolCallIDsForTurn(messages, assistantIndex)
 	updatedToolCalls := append([]ToolCall(nil), assistant.ToolCalls...)
 
-	// Collect all new tool result messages into a single slice so we can return them later
-	toolResultMessages := make([]Message, 0, len(updatedToolCalls))
+	outcomes := make([]toolCallOutcome, len(updatedToolCalls))
+	runnable := make([]int, 0, len(updatedToolCalls))
 	paused := false
 
+	// Phase A — decide. Walk the unresolved calls in model order and record one
+	// outcome each. Approval is evaluated sequentially for deterministic behavior.
 	for i := range updatedToolCalls {
-		toolCall := updatedToolCalls[i]
+		outcome := toolCallOutcome{toolCall: updatedToolCalls[i]}
 
-		if _, ok := resolved[toolCall.ID]; ok {
+		if _, ok := resolved[outcome.toolCall.ID]; ok {
+			outcomes[i] = outcome
 			continue
 		}
 
 		// A call that already reached a terminal outcome in an earlier pass needs
 		// only its tool message restored. Re-running it would repeat side effects.
-		if toolCall.ExecutionStatus == ExecutionStatusCompleted || toolCall.ExecutionStatus == ExecutionStatusFailed {
-			if len(toolCall.Result) > 0 {
-				toolResultMessages = append(
-					toolResultMessages,
-					NewToolResultMessage(toolCall.ID, string(toolCall.Result)),
-				)
+		if outcome.toolCall.ExecutionStatus == ExecutionStatusCompleted || outcome.toolCall.ExecutionStatus == ExecutionStatusFailed {
+			if len(outcome.toolCall.Result) > 0 {
+				msg := NewToolResultMessage(outcome.toolCall.ID, string(outcome.toolCall.Result))
+				outcome.resultMessage = &msg
+				outcomes[i] = outcome
 				continue
 			}
-			toolCall.ExecutionStatus = ExecutionStatusPending
+			outcome.toolCall.ExecutionStatus = ExecutionStatusPending
 		}
 
-		if toolCall.IsRejected() {
-			toolCall = failToolCall(toolCall, ToolCallRejectedContent)
-			updatedToolCalls[i] = toolCall
-			toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, ToolCallRejectedContent))
+		if outcome.toolCall.IsRejected() {
+			outcome.toolCall = failToolCall(outcome.toolCall, ToolCallRejectedContent)
+			msg := NewToolResultMessage(outcome.toolCall.ID, ToolCallRejectedContent)
+			outcome.resultMessage = &msg
+			outcomes[i] = outcome
 			continue
 		}
 
 		var tool Tool
 		if a.toolRegistry != nil {
-			tool = a.toolRegistry.GetTool(toolCall.ToolName)
+			tool = a.toolRegistry.GetTool(outcome.toolCall.ToolName)
 		}
 		if tool == nil {
-			content := ToolCallNotFoundContent(toolCall.ToolName)
-			toolCall = failToolCall(toolCall, content)
-			updatedToolCalls[i] = toolCall
-			toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, content))
+			content := ToolCallNotFoundContent(outcome.toolCall.ToolName)
+			outcome.toolCall = failToolCall(outcome.toolCall, content)
+			msg := NewToolResultMessage(outcome.toolCall.ID, content)
+			outcome.resultMessage = &msg
+			outcomes[i] = outcome
 			continue
 		}
 
-		if toolCall.IsPendingApproval() {
-			decision, err := tool.RequiresApproval(ctx, toolCall.Args)
+		if outcome.toolCall.IsPendingApproval() {
+			decision, err := tool.RequiresApproval(ctx, outcome.toolCall.Args)
 			if err != nil {
-				content := ToolCallExecutionErrorContent(toolCall.ToolName, err)
-				toolCall = failToolCall(toolCall, content)
-				updatedToolCalls[i] = toolCall
-				toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, content))
+				content := ToolCallExecutionErrorContent(outcome.toolCall.ToolName, err)
+				outcome.toolCall = failToolCall(outcome.toolCall, content)
+				msg := NewToolResultMessage(outcome.toolCall.ID, content)
+				outcome.resultMessage = &msg
+				outcomes[i] = outcome
 				continue
 			}
 			if decision.Required {
-				toolCall.Reason = decision.Reason
-				if toolCall.Reason == "" {
-					toolCall.Reason = "approval required"
+				outcome.toolCall.Reason = decision.Reason
+				if outcome.toolCall.Reason == "" {
+					outcome.toolCall.Reason = "approval required"
 				}
-				updatedToolCalls[i] = toolCall
 				paused = true
+				outcomes[i] = outcome
 				continue
 			}
 		}
 
-		if !toolCall.IsApproved() {
-			toolCall.ApprovalStatus = ApprovalStatusApproved
+		if !outcome.toolCall.IsApproved() {
+			outcome.toolCall.ApprovalStatus = ApprovalStatusApproved
 		}
 
-		toolCall.ExecutionStatus = ExecutionStatusRunning
-		updatedToolCalls[i] = toolCall
+		outcome.toolCall.ExecutionStatus = ExecutionStatusRunning
+		outcome.tool = tool
+		outcome.needsExecution = true
+		outcomes[i] = outcome
+		runnable = append(runnable, i)
+	}
 
-		result, err := ExecuteTool(ctx, tool, toolCall)
-		if err != nil {
-			content := ToolCallExecutionErrorContent(toolCall.ToolName, err)
-			toolCall = failToolCall(toolCall, content)
-			updatedToolCalls[i] = toolCall
-			toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, content))
-			continue
+	// Phase B — execute. Concurrency is allowed only when the whole turn can run:
+	// no call awaits approval, there is more than one runnable call, and the limit
+	// permits it. Otherwise fall back to the sequential path.
+	if paused || len(runnable) < 2 || a.effectiveMaxConcurrentTools() < 2 {
+		for _, i := range runnable {
+			outcomes[i] = runToolCall(ctx, outcomes[i])
 		}
+	} else {
+		a.executeToolCallsConcurrently(ctx, runnable, outcomes)
+	}
 
-		toolCall.Result = result
-		toolCall.ExecutionStatus = ExecutionStatusCompleted
-		updatedToolCalls[i] = toolCall
-		toolResultMessages = append(toolResultMessages, NewToolResultMessage(toolCall.ID, string(result)))
+	// Phase C — assemble in original order so tool messages stay in model tool-call order.
+	toolResultMessages := make([]Message, 0, len(outcomes))
+	for i := range outcomes {
+		updatedToolCalls[i] = outcomes[i].toolCall
+		if outcomes[i].resultMessage != nil {
+			toolResultMessages = append(toolResultMessages, *outcomes[i].resultMessage)
+		}
 	}
 
 	assistant.ToolCalls = updatedToolCalls
@@ -105,6 +133,52 @@ func (a *Agent) processToolCalls(ctx context.Context, chatID string, messages []
 	}
 
 	return toolResultMessages, paused, nil
+}
+
+// runToolCall executes one already-approved call and records its terminal state.
+// A failure is written into the outcome as a failed call plus an execution_failed
+// tool message. It is never returned to the caller and never cancels siblings.
+func runToolCall(ctx context.Context, outcome toolCallOutcome) toolCallOutcome {
+	result, err := ExecuteTool(ctx, outcome.tool, outcome.toolCall)
+	if err != nil {
+		content := ToolCallExecutionErrorContent(outcome.toolCall.ToolName, err)
+		outcome.toolCall = failToolCall(outcome.toolCall, content)
+		msg := NewToolResultMessage(outcome.toolCall.ID, content)
+		outcome.resultMessage = &msg
+		return outcome
+	}
+
+	outcome.toolCall.Result = result
+	outcome.toolCall.ExecutionStatus = ExecutionStatusCompleted
+	msg := NewToolResultMessage(outcome.toolCall.ID, string(result))
+	outcome.resultMessage = &msg
+	return outcome
+}
+
+// executeToolCallsConcurrently runs the runnable calls up to the configured limit.
+//
+// Failure isolation is deliberate: it does not use errgroup and does not derive a
+// cancelable context, so one call failing never cancels its siblings. runToolCall
+// records each failure in its own outcome instead of returning it, and wg.Wait
+// blocks until every call has reached a terminal outcome.
+func (a *Agent) executeToolCallsConcurrently(ctx context.Context, runnable []int, outcomes []toolCallOutcome) {
+	limit := a.effectiveMaxConcurrentTools()
+	if limit > len(runnable) {
+		limit = len(runnable)
+	}
+
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for _, i := range runnable {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			outcomes[i] = runToolCall(ctx, outcomes[i])
+		}(i)
+	}
+	wg.Wait()
 }
 
 // failToolCall records a terminal failure for one call. A call that still

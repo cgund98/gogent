@@ -10,7 +10,7 @@ Key features:
 
 - **Model** — calls the LLM with conversation history and returns the next assistant message. Implementations live in provider packages (e.g. `openai.NewChat(...).Build()`).
 - **MessageStore** — persists chat history so it can be loaded and continued later.
-- **Tool** — interfaces the agent with functions written by a developer.
+- **Tool** — interfaces the agent with functions written by a developer. `Execute` may be called concurrently for different calls on one turn, so it must be safe for concurrent use; `RequiresApproval` is always called sequentially.
 - **ToolRegistry** — lookup table of registered tools available to an agent. `RegisterTool` returns an error if a name is already registered. The agent holds a `*ToolRegistry` pointer so later registrations on the same registry are visible to the agent.
 - **ChatEventBroadcaster** — optional hook for UI or streaming clients. The agent emits `message_added` and `message_updated` events when messages are persisted. Use `NopBroadcaster` when events are not needed.
 - **Agent** — orchestrates the conversation loop: resolve outstanding tool work, call the model, persist results, repeat until the model produces a final answer or a guardrail pauses the run.
@@ -21,7 +21,7 @@ Key features:
 |------|----------------|
 | `agent.go` | Public agent API, run loop, store/broadcast helpers |
 | `tool_turn.go` | Transcript scanning — unresolved turns, turn-scoped tool-result matching, `ListPendingToolCalls` filtering |
-| `tool_execution.go` | Per-call execution — `processToolCalls`, `ExecuteTool` |
+| `tool_execution.go` | Per-call execution — `processToolCalls` (decide/execute/assemble with bounded concurrency), `ExecuteTool` |
 | `message.go` | Message types and assistant `ToolCall` helpers |
 | `tool.go` | `Tool` interface, registry, error payloads |
 | `event.go` | `ChatEventBroadcaster` and built-in broadcasters |
@@ -203,6 +203,8 @@ Before each model turn, the agent finds the current unresolved assistant turn an
 ```
 
 The agent only calls the model again once **every** `ToolCall` in that assistant turn has a corresponding `tool` message in the transcript.
+
+**Concurrent execution.** When a turn is fully executable — no call on it still awaits approval — the agent runs its runnable calls concurrently, bounded by `DefaultMaxConcurrentTools` (5). Configure the bound with `WithMaxConcurrentTools(n)` on `NewAgent`; `1` or less sequential-disables the fan-out. A paused turn stays sequential: approved siblings still execute one at a time while approval-required calls remain pending. A failing call never cancels its siblings — the fan-out uses a semaphore and `WaitGroup`, not `errgroup`, and derives no cancelable context, so every runnable call still reaches a terminal outcome and gets its `tool` message. Tool messages are assembled in model tool-call order regardless of completion order, and `RequiresApproval` is evaluated sequentially. Because `Execute` may now run concurrently, a tool's `Execute` must be safe for concurrent use. Tool execution failures and unknown tools do **not** stop the run.
 
 **3. Model turn**
 

@@ -9,12 +9,27 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultMaxConcurrentTools is how many tool calls on one assistant turn may
+// execute at the same time when no explicit limit is configured.
+const DefaultMaxConcurrentTools = 5
+
 type Agent struct {
-	store         MessageStore
-	broadcaster   ChatEventBroadcaster
-	model         Model
-	toolRegistry  *ToolRegistry
-	maxIterations int
+	store              MessageStore
+	broadcaster        ChatEventBroadcaster
+	model              Model
+	toolRegistry       *ToolRegistry
+	maxIterations      int
+	maxConcurrentTools int
+}
+
+// AgentOption customizes an Agent built by NewAgent.
+type AgentOption func(*Agent)
+
+// WithMaxConcurrentTools sets how many tool calls on one assistant turn may
+// execute at the same time. Values <= 0 fall back to DefaultMaxConcurrentTools;
+// 1 disables concurrent execution.
+func WithMaxConcurrentTools(n int) AgentOption {
+	return func(a *Agent) { a.maxConcurrentTools = n }
 }
 
 type PendingToolCall struct {
@@ -27,14 +42,29 @@ type PendingToolCall struct {
 
 // NewAgent creates an agent with the given dependencies and iteration limit.
 // maxIterations applies to model turns only; tool resolution is not capped.
-func NewAgent(store MessageStore, broadcaster ChatEventBroadcaster, model Model, toolRegistry *ToolRegistry, maxIterations int) *Agent {
-	return &Agent{
+// Options such as WithMaxConcurrentTools customize tool execution.
+func NewAgent(store MessageStore, broadcaster ChatEventBroadcaster, model Model, toolRegistry *ToolRegistry, maxIterations int, opts ...AgentOption) *Agent {
+	a := &Agent{
 		store:         store,
 		broadcaster:   broadcaster,
 		model:         model,
 		toolRegistry:  toolRegistry,
 		maxIterations: maxIterations,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
+
+// effectiveMaxConcurrentTools resolves the configured concurrency limit, falling
+// back to DefaultMaxConcurrentTools when the field is unset (e.g. zero-valued
+// Agent literals).
+func (a *Agent) effectiveMaxConcurrentTools() int {
+	if a.maxConcurrentTools <= 0 {
+		return DefaultMaxConcurrentTools
+	}
+	return a.maxConcurrentTools
 }
 
 // ErrAwaitingApproval reports that RunWithUserInput was called while tool calls

@@ -8,7 +8,7 @@ Gogent is a Go **library** for agentic apps with tool calling and human-in-the-l
 |------|------|
 | `agent.go` | Public agent API, run loop, store/broadcast helpers |
 | `tool_turn.go` | Transcript scanning — unresolved turns, turn-scoped tool-result matching, `ListPendingToolCalls` filtering |
-| `tool_execution.go` | Per-call execution — `processToolCalls`, `ExecuteTool` |
+| `tool_execution.go` | Per-call execution — `processToolCalls` (decide/execute/assemble, bounded concurrency), `ExecuteTool` |
 | `message.go`, `message_test.go` | Message types and assistant `ToolCall` helpers |
 | `tool.go` | `Tool` interface, registry, error payloads |
 | `model.go` | `Model` interface |
@@ -27,7 +27,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full lifecycle. In code:
 
 - **`run` / `findAndApplyUnresolvedToolCalls`** (`agent.go`) — orchestration only. Each iteration resolves tool work first, then optionally calls the model. Tool resolution does not count toward `maxIterations`. `RunWithUserInput` settles outstanding tool work before it records the `user` message, so a user message can never land between an assistant tool request and its `tool` messages; it returns `ErrAwaitingApproval` when that turn still awaits approval.
 - **`findUnresolvedToolTurn`, `resolvedToolCallIDsForTurn`** (`tool_turn.go`) — which assistant turn is outstanding; a `tool` message counts only when it appears **after** that assistant message.
-- **`processToolCalls`** (`tool_execution.go`) — approve/reject/execute/fail individual calls and append `tool` transcript messages. A failed call is settled (`ApprovalStatus` approved, unless it was rejected) so it cannot hold its turn open for an approval that will never come, and a call that already reached `completed` or `failed` is never executed twice — a later pass only restores its `tool` message from `ToolCall.Result`.
+- **`processToolCalls`** (`tool_execution.go`) — approve/reject/execute/fail individual calls and append `tool` transcript messages. It runs decide (sequential), execute (concurrent when the turn has no pending approval, bounded by `WithMaxConcurrentTools`, default 5), and assemble (sequential, preserving model tool-call order) phases. Failures are isolated: no `errgroup` and no derived cancel context, so one call failing never cancels its siblings. A failed call is settled (`ApprovalStatus` approved, unless it was rejected) so it cannot hold its turn open for an approval that will never come, and a call that already reached `completed` or `failed` is never executed twice — a later pass only restores its `tool` message from `ToolCall.Result`.
 
 Do not duplicate tool execution in `run`; new tool requests from the model are handled on the next loop iteration via `findAndApplyUnresolvedToolCalls`.
 
